@@ -56,6 +56,8 @@ namespace StereoMatching
         public int PointCount { get; private set; }
         public long Timestamp { get; private set; }
 
+        public bool IsUpdating { get; set; } = true;
+
         public event Action<long, int>? PointCloudUpdated;
 
         private static StereoRunner? s_instance;
@@ -127,6 +129,8 @@ namespace StereoMatching
         {
             while (_notifyQueue.TryDequeue(out var ev))
             {
+                if (!IsUpdating) return;
+
                 PullLatest(ev.ts);
                 PointCloudUpdated?.Invoke(ev.ts, PointCount);
             }
