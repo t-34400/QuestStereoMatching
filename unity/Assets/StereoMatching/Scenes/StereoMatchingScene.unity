@@ -687,6 +687,9 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: d63efc3723e4f494db27bec3c06f2c9d, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  width: 1280
+  height: 960
+  maxPoints: 500000
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

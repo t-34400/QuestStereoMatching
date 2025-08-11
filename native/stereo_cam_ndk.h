@@ -10,6 +10,7 @@ typedef void (*StereoYuvCallback)(
     int yRowStride, int uRowStride, int vRowStride,
     int uvPixelStride,
     int64_t timestampNs);
+typedef void (*PointCloudUpdatedCallback)(int64_t timestampNs, int numPoints);
 
 struct CamIntrinsics { float fx, fy, cx, cy, skew; };
 
@@ -28,4 +29,6 @@ bool  StereoCam_GetCameraIds(const char** outLeftId, const char** outRightId);
 bool  StereoCam_GetIntrinsics(bool isLeft, CamIntrinsics* out);
 bool  StereoCam_GetExtrinsics(bool isLeft, CamExtrinsics* out);
 
+void  PC_RegisterPointCloudUpdated(PointCloudUpdatedCallback cb);
+bool  PC_GetPointCloudXYZRGB(float* dst, int maxN, int* outN);
 } // extern "C"

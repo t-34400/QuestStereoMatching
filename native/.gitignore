@@ -41,4 +41,4 @@
 *.dwo
 
 # Third party build file
-third_party
+!third_party/**/*.so
