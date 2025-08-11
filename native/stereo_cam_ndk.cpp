@@ -1,4 +1,5 @@
 #include "stereo_cam_ndk.h"
+#include <string>
 #include <android/log.h>
 #include <android/native_window.h>
 #include <camera/NdkCameraManager.h>
@@ -16,20 +17,21 @@ static int g_w = 0, g_h = 0;
 static StereoYuvCallback g_cb = nullptr;
 
 struct CamSide {
-    const char* id = nullptr;
+    std::string id;
     ACameraDevice* dev = nullptr;
     AImageReader* reader = nullptr;
     ANativeWindow* window = nullptr;
     ACaptureRequest* req = nullptr;
     ACameraOutputTarget* target = nullptr;
     ACaptureSessionOutput* out = nullptr;
+    ACaptureSessionOutputContainer* container = nullptr;
     ACameraCaptureSession* session = nullptr;
     bool opened = false;
-
     CamIntrinsics K{};
     CamExtrinsics X{};
     bool hasParams = false;
 };
+
 
 static CamSide g_left, g_right;
 static ACaptureSessionOutputContainer* g_container = nullptr;
@@ -75,10 +77,25 @@ static int read_i32(const ACameraMetadata* m, uint32_t tag, int32_t* out) {
     if (!m) return -1;
     ACameraMetadata_const_entry e{};
     camera_status_t st = ACameraMetadata_getConstEntry(m, tag, &e);
-    if (st != ACAMERA_OK) return 0;
-    if (e.type != ACAMERA_TYPE_INT32 || e.count < 1) return -1;
-    *out = e.data.i32[0];
-    return 1;
+    if (st != ACAMERA_OK) {
+        LOGI("Tag 0x%08x not found (status=%d)", tag, st);
+        return 0; // not found
+    }
+    if (e.count < 1) {
+        LOGI("Tag 0x%08x has no data", tag);
+        return -1;
+    }
+
+    if (e.type == ACAMERA_TYPE_INT32) {
+        *out = e.data.i32[0];
+        return 1;
+    } else if (e.type == ACAMERA_TYPE_BYTE) {
+        *out = static_cast<int32_t>(e.data.u8[0]);
+        return 1;
+    } else {
+        LOGI("Tag 0x%08x type mismatch: expected INT32/BYTE, got type=%d", tag, e.type);
+        return -1;
+    }
 }
 
 static int read_floats(const ACameraMetadata* m, uint32_t tag, float* dst, int needCount) {
@@ -117,22 +134,45 @@ static bool load_params_for_id(const char* camId, CamIntrinsics* K, CamExtrinsic
 }
 
 static bool find_left_right_ids(const ACameraIdList* ids, const char** outLeft, const char** outRight) {
-    const char* leftId = nullptr; const char* rightId = nullptr;
+    LOGI("find_left_right_ids: numCameras=%d", ids->numCameras);
+
+    const char* leftId  = nullptr;
+    const char* rightId = nullptr;
+
     for (int i = 0; i < ids->numCameras; ++i) {
         const char* id = ids->cameraIds[i];
+        LOGI("  Checking cameraId[%d] = %s", i, id);
+
         ACameraMetadata* chars = nullptr;
-        if (ACameraManager_getCameraCharacteristics(g_mgr, id, &chars) != ACAMERA_OK || !chars) continue;
+        camera_status_t stat = ACameraManager_getCameraCharacteristics(g_mgr, id, &chars);
+        if (stat != ACAMERA_OK || !chars) {
+            LOGI("    Failed to get characteristics (status=%d)", stat);
+            continue;
+        }
 
         int32_t source = -1, pos = -1;
         int a = read_i32(chars, TAG_META_CAMERA_SOURCE, &source);
-        int b = read_i32(chars, TAG_META_POSITION, &pos);
+        int b = read_i32(chars, TAG_META_POSITION,      &pos);
+
+        LOGI("    TAG_META_CAMERA_SOURCE: %s (%d)", (a==1 ? "OK" : "MISSING"), source);
+        LOGI("    TAG_META_POSITION:      %s (%d)", (b==1 ? "OK" : "MISSING"), pos);
+
         if (a == 1 && b == 1 && source == 0) {
-            if (pos == 0 && !leftId)  leftId  = id;
-            if (pos == 1 && !rightId) rightId = id;
+            if (pos == 0 && !leftId)  { leftId  = id; LOGI("    -> Chosen as LEFT"); }
+            if (pos == 1 && !rightId) { rightId = id; LOGI("    -> Chosen as RIGHT"); }
         }
+
         ACameraMetadata_free(chars);
     }
-    if (leftId && rightId) { *outLeft = leftId; *outRight = rightId; return true; }
+
+    if (leftId && rightId) {
+        LOGI("find_left_right_ids: SUCCESS left=%s right=%s", leftId, rightId);
+        *outLeft  = leftId;
+        *outRight = rightId;
+        return true;
+    }
+
+    LOGI("find_left_right_ids: FAILED to find both left and right IDs");
     return false;
 }
 
@@ -154,13 +194,13 @@ static bool open_one(CamSide& side, bool isLeft) {
     devCb.onDisconnected = OnDeviceDisconnected;
     devCb.onError = OnDeviceError;
 
-    if (ACameraManager_openCamera(g_mgr, side.id, &devCb, &side.dev) != ACAMERA_OK) {
-        LOGE("openCamera failed: %s", side.id);
+    if (ACameraManager_openCamera(g_mgr, side.id.c_str(), &devCb, &side.dev) != ACAMERA_OK) {
+        LOGE("openCamera failed: %s", side.id.c_str());
         return false;
     }
 
-    if (!load_params_for_id(side.id, &side.K, &side.X)) {
-        LOGE("Failed to load intrinsics/extrinsics: %s", side.id);
+    if (!load_params_for_id(side.id.c_str(), &side.K, &side.X)) {
+        LOGE("Failed to load intrinsics/extrinsics: %s", side.id.c_str());
         return false;
     }
     side.hasParams = true;
@@ -195,16 +235,16 @@ static bool open_one(CamSide& side, bool isLeft) {
         return false;
     }
 
-    if (!g_container && ACaptureSessionOutputContainer_create(&g_container) != ACAMERA_OK) {
-        LOGE("OutputContainer_create failed");
-        return false;
-    }
     if (ACaptureSessionOutput_create(side.window, &side.out) != ACAMERA_OK) {
-        LOGE("SessionOutput_create failed");
+        LOGE("SessionOutput_create failed (id=%s)", side.id.c_str());
         return false;
     }
-    if (ACaptureSessionOutputContainer_add(g_container, side.out) != ACAMERA_OK) {
-        LOGE("Container_add failed");
+    if (ACaptureSessionOutputContainer_create(&side.container) != ACAMERA_OK) {
+        LOGE("OutputContainer_create failed (id=%s)", side.id.c_str());
+        return false;
+    }
+    if (ACaptureSessionOutputContainer_add(side.container, side.out) != ACAMERA_OK) {
+        LOGE("Container_add failed (id=%s)", side.id.c_str());
         return false;
     }
 
@@ -222,24 +262,21 @@ bool StereoCam_Init(int width, int height) {
     if (!open_one(g_left, true))  return false;
     if (!open_one(g_right, false)) return false;
 
-    LOGI("Init OK: left=%s right=%s", g_left.id, g_right.id);
+    LOGI("Init OK: left=%s right=%s", g_left.id.c_str(), g_right.id.c_str());
     return true;
 }
 
 static bool start_one(CamSide& s) {
     ACameraCaptureSession_stateCallbacks sessCb{};
-    sessCb.context  = nullptr;
-    sessCb.onActive = nullptr;
-    sessCb.onReady  = nullptr;
-    sessCb.onClosed = nullptr;
-
-    if (ACameraDevice_createCaptureSession(s.dev, g_container, &sessCb, &s.session) != ACAMERA_OK) {
-        LOGE("createCaptureSession failed");
+    camera_status_t rc = ACameraDevice_createCaptureSession(s.dev, s.container, &sessCb, &s.session);
+    if (rc != ACAMERA_OK) {
+        LOGE("createCaptureSession failed (id=%s, rc=%d)", s.id.c_str(), rc);
         return false;
     }
     int seqId=0;
-    if (ACameraCaptureSession_setRepeatingRequest(s.session, nullptr, 1, &s.req, &seqId) != ACAMERA_OK) {
-        LOGE("setRepeatingRequest failed");
+    rc = ACameraCaptureSession_setRepeatingRequest(s.session, nullptr, 1, &s.req, &seqId);
+    if (rc != ACAMERA_OK) {
+        LOGE("setRepeatingRequest failed (id=%s, rc=%d)", s.id.c_str(), rc);
         return false;
     }
     return true;
@@ -259,8 +296,8 @@ void StereoCam_Stop() {
         if (s.req)     { ACaptureRequest_free(s.req); s.req=nullptr; }
         if (s.target)  { ACameraOutputTarget_free(s.target); s.target=nullptr; }
         if (s.out)     { ACaptureSessionOutput_free(s.out); s.out=nullptr; }
+        if (s.container){ ACaptureSessionOutputContainer_free(s.container); s.container=nullptr; } // ← 追加
         if (s.reader)  { AImageReader_delete(s.reader); s.reader=nullptr; }
-        if (s.dev)     { ACameraDevice_close(s.dev); s.dev=nullptr; }
         s.window=nullptr;
         s.opened=false;
     };
@@ -276,8 +313,8 @@ void StereoCam_Shutdown(){ StereoCam_Stop(); }
 
 bool StereoCam_GetCameraIds(const char** outLeftId, const char** outRightId) {
     if (!g_left.opened || !g_right.opened) return false;
-    if (outLeftId)  *outLeftId  = g_left.id;
-    if (outRightId) *outRightId = g_right.id;
+    if (outLeftId)  *outLeftId  = g_left.id.c_str();
+    if (outRightId) *outRightId = g_right.id.c_str();
     return true;
 }
 
