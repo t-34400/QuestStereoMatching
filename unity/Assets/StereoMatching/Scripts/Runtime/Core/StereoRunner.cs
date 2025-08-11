@@ -73,7 +73,7 @@ namespace StereoMatching
 
             position = new Vector3(camExtrinsics.tx, camExtrinsics.ty, -camExtrinsics.tz);
             var invRot = new Quaternion(-camExtrinsics.qx, -camExtrinsics.qy, camExtrinsics.qz, camExtrinsics.qw);
-            rotation = Quaternion.Inverse(invRot);
+            rotation = Quaternion.Inverse(invRot) * Quaternion.Euler(180, 0, 0);
         }
 
         private void OnEnable()

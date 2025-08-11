@@ -1,57 +1,60 @@
-Shader "Unlit/PointCloud_Billboard"
+Shader "PointCloud/Billboard"
 {
     SubShader
-    { Pass
-      {
-        ZWrite On ZTest LEqual Cull Off
-        HLSLPROGRAM
-        #pragma vertex vert
-        #pragma fragment frag
-        #pragma multi_compile_instancing
-        #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
-
-        StructuredBuffer<float3> _XYZRGB;
-        float4x4 _MRectLeftToWorld;
-        float _Fx;
-        float _PointSizePx;
-
-        struct appdata {
-          float3 posOS : POSITION;
-          float2 uv    : TEXCOORD0;
-          UNITY_VERTEX_INPUT_INSTANCE_ID
-        };
-        struct v2f {
-          float4 posCS : SV_Position;
-          float3 col   : COLOR0;
-        };
-
-        v2f vert(appdata v, uint instID : SV_InstanceID)
+    {
+        Tags { "Queue"="Transparent" "RenderType"="Transparent" }
+        Pass
         {
-            UNITY_SETUP_INSTANCE_ID(v);
-            v2f o;
+            Cull Off
+            ZWrite Off
+            ZTest LEqual
+            Blend Off
 
-            uint iPos = instID * 2u;
-            uint iRgb = iPos + 1u;
-            float3 p_rect = _XYZRGB[iPos];
-            float3 rgb    = _XYZRGB[iRgb];
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma vertex Vert
+            #pragma fragment Frag
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 
-            // rect-left -> world -> view
-            float4 wpos = mul(_MRectLeftToWorld, float4(p_rect,1));
-            float4 vpos = mul(UNITY_MATRIX_V, wpos);
+            struct Point { float3 pos; float3 rgb; };
+            StructuredBuffer<Point> _PointBuffer;
+            float4x4 _PointCloudLocalToWorld;
+            int _PixelSize;
 
-            // pixel-constant size (approx): size_world = sizePx * (-z_view) / fx_px
-            float scale = _PointSizePx * (-vpos.z) / max(_Fx, 1e-6);
+            struct VS_OUT { float4 clipPos:SV_Position; float3 rgb:TEXCOORD0; };
 
-            // billboard in view space (X=right, Y=up)
-            float2 o2 = v.uv;           // [-1,+1]
-            float4 vCorner = vpos + float4(o2.x * scale, o2.y * scale, 0, 0);
+            static const uint LUT[6] = {0,1,2, 0,2,3};
 
-            o.posCS = mul(UNITY_MATRIX_P, vCorner);
-            o.col   = rgb;
-            return o;
+            VS_OUT Vert(uint vid:SV_VertexID)
+            {
+                uint i  = vid / 6;
+                uint ci = LUT[vid % 6];
+
+                Point p = _PointBuffer[i];
+
+                p.pos.y *= -1;
+
+                float4 w = mul(_PointCloudLocalToWorld, float4(p.pos, 1));
+                float4 c = mul(unity_MatrixVP, w);
+                if (abs(c.w) < 1e-6) c.w = 1e-6;
+
+                float s = (float)max(1, _PixelSize);
+                float2 corners[4] = {
+                    float2(-s,-s), float2(s,-s), float2(s,s), float2(-s,s)
+                };
+                float2 ndc = (c.xy / c.w) + (corners[ci] * (2.0 / _ScreenParams.xy));
+
+                VS_OUT o;
+                o.clipPos = float4(ndc * c.w, c.z, c.w);
+                o.rgb = p.rgb;
+                return o;
+            }
+
+            float4 Frag(VS_OUT i):SV_Target
+            {
+                return float4(i.rgb, 1.0);
+            }
+            ENDHLSL
         }
-
-        half4 frag(v2f i) : SV_Target { return half4(i.col, 1); }
-        ENDHLSL
-      } }
+    }
 }

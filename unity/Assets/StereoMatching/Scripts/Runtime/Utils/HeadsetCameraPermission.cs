@@ -16,8 +16,6 @@ namespace StereoMatching
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
             CheckAndRequest();
-#else
-            onPermissionsGranted?.Invoke();
 #endif
         }
 
