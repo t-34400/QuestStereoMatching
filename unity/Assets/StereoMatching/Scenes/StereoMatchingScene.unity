@@ -598,7 +598,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 0, y: -10}
+  m_AnchoredPosition: {x: 0, y: -50}
   m_SizeDelta: {x: 12, y: 4}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &413954399
@@ -1075,6 +1075,31 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   width: 1280
   height: 960
+  isNV12: 1
+  targetHz: 10
+  maxPairDtMs: 4
+  cropLimit: 1.2
+  tileGridW: 8
+  tileGridH: 8
+  minDisparity: 2
+  numDisparities: 96
+  blockSize: 3
+  p1Mul: 8
+  p2Mul: 96
+  disp12MaxDiff: 1
+  preFilterCap: 15
+  uniquenessRatio: 35
+  speckleWindowSize: 100
+  speckleRange: 1
+  mode: 2
+  wlsLambda: 10000
+  wlsSigmaColor: 0.9
+  scale: 0.5
+  zMax: 1.5
+  confThr: 0
+  lrTolerance: 100
+  outputRowStep: 2
+  outputColStep: 2
   maxPoints: 500000
 --- !u!1 &1796386667
 GameObject:

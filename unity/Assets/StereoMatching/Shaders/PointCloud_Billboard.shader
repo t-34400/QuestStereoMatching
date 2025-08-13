@@ -6,7 +6,6 @@ Shader "PointCloud/Billboard"
         Pass
         {
             Cull Off
-            ZWrite Off
             ZTest LEqual
             Blend Off
 

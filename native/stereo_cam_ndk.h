@@ -19,6 +19,45 @@ struct CamExtrinsics {
     float qx, qy, qz, qw;
 };
 
+struct PC_Config {
+    int imgW, imgH;
+    int isNV12;              // 1: NV12 (UV), 0: NV21 (VU)
+
+    int targetHz;            // processing loop Hz
+    int maxPairDtMs;       // L/R pairing window
+
+    // CLAHE
+    double cropLimit;
+    int tileGridW;
+    int tileGridH;
+
+    // SGBM
+    int minDisparity;
+    int numDisparities;      // multiple of 16
+    int blockSize;
+    int p1Mul;
+    int p2Mul; 
+    int disp12MaxDiff;
+    int preFilterCap;
+    int uniquenessRatio;
+    int speckleWindowSize;
+    int speckleRange;
+    int mode;                // 0:SGBM 1:HH 2:SGBM_3WAY 3:HH4
+
+    // WLS filter
+    double wlsLambda;
+    double wlsSigmaColor;
+
+    // Post / reprojection
+    float scale;             // 0<scale<=1, stereo at reduced scale
+    float zMax;              // point cloud clamp
+    float confThr;           // confidence threshold
+    float lrTolerance;       // LR check tolerance
+
+    int outputRowStep;
+    int outputColStep;
+};
+
 void  StereoCam_RegisterCallback(StereoYuvCallback cb);
 bool  StereoCam_Init(int width, int height);
 bool  StereoCam_Start();
@@ -29,6 +68,8 @@ bool  StereoCam_GetCameraIds(const char** outLeftId, const char** outRightId);
 bool  StereoCam_GetIntrinsics(bool isLeft, CamIntrinsics* out);
 bool  StereoCam_GetExtrinsics(bool isLeft, CamExtrinsics* out);
 
+void  PC_InitProcessing(const PC_Config* cfg);
 void  PC_RegisterPointCloudUpdated(PointCloudUpdatedCallback cb);
 bool  PC_GetPointCloudXYZRGB(float* dst, int maxN, int* outN);
+void  PC_StopProcessing();
 } // extern "C"
