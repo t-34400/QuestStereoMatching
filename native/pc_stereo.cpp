@@ -28,11 +28,12 @@ YuvFrame g_leftBuf[kRing], g_rightBuf[kRing];
 int g_li=0, g_ri=0;
 std::mutex g_mtx;
 
-bool g_isNV12 = true; // if colors odd, toggle from C# later via setter if needed
 bool g_rectReady = false;
 
 cv::Mat g_map1x, g_map1y, g_map2x, g_map2y, g_Q;
 cv::Ptr<cv::StereoSGBM> g_sgbm;
+cv::Ptr<cv::StereoMatcher> g_right;
+cv::Ptr<cv::ximgproc::DisparityWLSFilter> g_wls;
 
 std::mutex g_bufMtx;
 std::condition_variable g_bufCv;
@@ -47,7 +48,8 @@ PointCloudUpdatedCallback g_pcCb = nullptr;
 // cached intrinsics/extrinsics
 CamIntrinsics g_KL{}, g_KR{};
 CamExtrinsics g_XL{}, g_XR{};
-int g_imgW=0, g_imgH=0;
+
+PC_Config g_cfg;
 
 static inline std::chrono::milliseconds hz_period(int hz) {
     return std::chrono::milliseconds(hz > 0 ? (1000 / hz) : 1000);
@@ -67,6 +69,9 @@ static cv::Mat yuv420_to_bgr(const YuvFrame& f) {
 
     if (f.uvPixStride == 2) {
         // NV12 (UV) or NV21 (VU): build CV_8UC2 uv(H/2, W/2)
+
+        bool isNV12 = g_cfg.isNV12;
+
         cv::Mat uv(f.h/2, f.w/2, CV_8UC2);
         for (int r = 0; r < uv.rows; ++r) {
             const uint8_t* pu = f.u.data() + r * f.uStride;
@@ -75,12 +80,12 @@ static cv::Mat yuv420_to_bgr(const YuvFrame& f) {
             for (int c = 0; c < uv.cols; ++c) {
                 const uint8_t U = pu[c * f.uvPixStride];
                 const uint8_t V = pv[c * f.uvPixStride];
-                prow[c] = g_isNV12 ? cv::Vec2b(U, V)  // NV12: UV
+                prow[c] = isNV12 ? cv::Vec2b(U, V)  // NV12: UV
                                    : cv::Vec2b(V, U); // NV21: VU
             }
         }
         cv::Mat bgr;
-        const int code = g_isNV12 ? cv::COLOR_YUV2BGR_NV12 : cv::COLOR_YUV2BGR_NV21;
+        const int code = isNV12 ? cv::COLOR_YUV2BGR_NV12 : cv::COLOR_YUV2BGR_NV21;
         cv::cvtColorTwoPlane(y, uv, bgr, code);
         return bgr;
     } else {
@@ -99,7 +104,7 @@ static cv::Mat yuv420_to_bgr(const YuvFrame& f) {
 
 cv::Mat to_gray_clahe(const cv::Mat& bgr) {
     cv::Mat g; cv::cvtColor(bgr, g, cv::COLOR_BGR2GRAY);
-    auto clahe = cv::createCLAHE(2.0, cv::Size(8,8));
+    auto clahe = cv::createCLAHE(g_cfg.cropLimit, cv::Size(g_cfg.tileGridW,g_cfg.tileGridH));
     cv::Mat out; clahe->apply(g, out); return out;
 }
 
@@ -156,12 +161,13 @@ void ensure_rectify() {
     cv::Mat t21 = tR - R21 * tL;
 
     cv::Mat R1,R2,P1,P2,Q;
-    cv::stereoRectify(K1,D1,K2,D2, cv::Size(g_imgW,g_imgH),
+    LOGI("g_cfg.imgW=%d, g_cfg.imgH=%d", g_cfg.imgW, g_cfg.imgH);
+    cv::stereoRectify(K1,D1,K2,D2, cv::Size(g_cfg.imgW,g_cfg.imgH),
                       R21, t21, R1,R2,P1,P2,Q,
                       cv::CALIB_ZERO_DISPARITY, 0.0);
 
-    cv::initUndistortRectifyMap(K1,D1,R1,P1, cv::Size(g_imgW,g_imgH), CV_32FC1, g_map1x,g_map1y);
-    cv::initUndistortRectifyMap(K2,D2,R2,P2, cv::Size(g_imgW,g_imgH), CV_32FC1, g_map2x,g_map2y);
+    cv::initUndistortRectifyMap(K1,D1,R1,P1, cv::Size(g_cfg.imgW,g_cfg.imgH), CV_32FC1, g_map1x,g_map1y);
+    cv::initUndistortRectifyMap(K2,D2,R2,P2, cv::Size(g_cfg.imgW,g_cfg.imgH), CV_32FC1, g_map2x,g_map2y);
     g_Q = Q;
     g_rectReady = true;
 
@@ -192,24 +198,35 @@ void ensure_rectify() {
     logMat("Q", Q);
 
     // SGBM
-    const int block=7, numDisp=64;
+    int block = g_cfg.blockSize;
+    int numDisp = g_cfg.numDisparities;
+    int numCh = 1;
     g_sgbm = cv::StereoSGBM::create(
-        0,                      // minDisparity
+        g_cfg.minDisparity,
         (numDisp+15)/16*16,     // numDisparities
         block,                  // blockSize
-        8*3*block*block,        // P1
-        32*3*block*block,       // P2
-        1,                      // disp12MaxDiff
-        30,                     // preFilterCap
-        20,                    // uniquenessRatio
-        3,                      // speckleWindowSize
-        cv::StereoSGBM::MODE_SGBM_3WAY // mode
+        g_cfg.p1Mul*numCh*block*block,       // P1
+        g_cfg.p2Mul*numCh*block*block,       // P2
+        g_cfg.disp12MaxDiff,
+        g_cfg.preFilterCap,
+        g_cfg.uniquenessRatio,
+        g_cfg.speckleWindowSize,
+        g_cfg.speckleRange, 
+        g_cfg.mode
     );
+    g_right = cv::ximgproc::createRightMatcher(g_sgbm);
+    g_wls = cv::ximgproc::createDisparityWLSFilter(g_sgbm);
+    g_wls->setLambda(g_cfg.wlsLambda);
+    g_wls->setSigmaColor(g_cfg.wlsSigmaColor);
 }
 
 void process_pair(const YuvFrame& L, const YuvFrame& R) {
-    auto t0 = std::chrono::steady_clock::now();
+    double scale  = g_cfg.scale;
+    float confThr = g_cfg.confThr;
+    float lr_tol  = g_cfg.lrTolerance;
+    float zMax    = g_cfg.zMax;
 
+    auto t0 = std::chrono::steady_clock::now();
     ensure_rectify();
 
     cv::Mat Lbgr = yuv420_to_bgr(L);
@@ -219,32 +236,68 @@ void process_pair(const YuvFrame& L, const YuvFrame& R) {
     cv::remap(Lbgr, Lrect, g_map1x, g_map1y, cv::INTER_LINEAR);
     cv::remap(Rbgr, Rrect, g_map2x, g_map2y, cv::INTER_LINEAR);
 
-    const double scale = 0.5;
     cv::Mat Ls, Rs;
     cv::resize(Lrect, Ls, cv::Size(), scale, scale, cv::INTER_AREA);
     cv::resize(Rrect, Rs, cv::Size(), scale, scale, cv::INTER_AREA);
 
-    cv::Mat dispS16; g_sgbm->compute(Ls, Rs, dispS16);
-    cv::Mat dispS;   dispS16.convertTo(dispS, CV_32F, 1.0/16.0);
+    cv::Mat gL = to_gray_clahe(Ls);
+    cv::Mat gR = to_gray_clahe(Rs);
 
-    cv::Mat dispFull;
-    cv::resize(dispS, dispFull, cv::Size(Lrect.cols, Lrect.rows), 0, 0, cv::INTER_LINEAR);
-    for (int y=0; y<dispFull.rows; ++y) {
-        float* r = dispFull.ptr<float>(y);
-        for (int x=0; x<dispFull.cols; ++x) if (r[x] > 0.f) r[x] *= (1.0/scale);
+    cv::Mat dispL_16S, dispR_16S;
+    g_sgbm->compute(gL, gR, dispL_16S);
+    g_right->compute(gR, gL, dispR_16S);
+
+    cv::Mat disp_wls_16S;
+    g_wls->filter(dispL_16S, gL, disp_wls_16S, dispR_16S);
+
+    cv::Mat conf32f = g_wls->getConfidenceMap();
+
+    cv::Mat dispS; disp_wls_16S.convertTo(dispS, CV_32F, 1.0/16.0);
+
+    cv::Mat dL32f, dR32f;
+    disp_wls_16S.convertTo(dL32f, CV_32F, 1.0/16.0);
+    dispR_16S.convertTo(dR32f, CV_32F, 1.0/16.0);
+
+    cv::Mat dispFull(Lrect.rows, Lrect.cols, CV_32F);
+    const float invScale = 1.0f / static_cast<float>(scale);
+
+    #pragma omp parallel for
+    for (int Y = 0; Y < dispFull.rows; ++Y) {
+        float* df = dispFull.ptr<float>(Y);
+        int y = std::min((int)std::lround(Y * scale), dL32f.rows - 1); // nearest-neighbor index
+        const float* lrow = dL32f.ptr<float>(y);
+        const float* rrow = dR32f.ptr<float>(y);
+        const float* crow = conf32f.ptr<float>(y);
+
+        for (int X = 0; X < dispFull.cols; ++X) {
+            int x = std::min((int)std::lround(X * scale), dL32f.cols - 1);
+
+            float dl = lrow[x];
+            if (!(dl > 0)) { df[X] = 0.f; continue; }
+            if (crow[x] < confThr) { df[X] = 0.f; continue; }
+
+            int xr = x - (int)std::lround(dl);                 // LR hard check (nearest)
+            if ((unsigned)xr >= (unsigned)dR32f.cols) { df[X] = 0.f; continue; }
+            float dr = rrow[xr];
+            if (std::fabs(dl + dr) > lr_tol) { df[X] = 0.f; continue; }
+
+            df[X] = dl * invScale; // valid: write scaled disparity to full-res
+        }
     }
-    
+
     cv::Mat xyz;
     cv::reprojectImageTo3D(dispFull, xyz, g_Q, true, CV_32F);
 
-    const float zMax = 1.5f;
     std::vector<float> out; out.reserve(30000*6);
+    int rowStep = g_cfg.outputRowStep;
+    int colStep = g_cfg.outputColStep;
+
     const cv::Mat& rgbSrc = Lrect;
-    for (int y=0;y<xyz.rows;y++){
+    for (int y=0;y<xyz.rows;y+=rowStep){
         const cv::Vec3f* row  = xyz.ptr<cv::Vec3f>(y);
         const float*     drow = dispFull.ptr<float>(y);
         const cv::Vec3b* crow = rgbSrc.ptr<cv::Vec3b>(y);
-        for (int x=0;x<xyz.cols;x++){
+        for (int x=0;x<xyz.cols;x+=colStep){
             const float d = drow[x];
             if (!(d>0)) continue;
             const auto& p = row[x];
@@ -289,7 +342,7 @@ extern "C" bool GetPointCloud(float* dst, int maxN, int* outN) {
     return true;
  }
  
-extern "C" bool PC_GetPointCloudXYZRGB(float* dst, int maxN, int* outN) {
+bool PC_GetPointCloudXYZRGB(float* dst, int maxN, int* outN) {
     if (!dst || !outN) return false;
     std::lock_guard<std::mutex> lk(g_mtx);
     const int n = std::min<int>((int)(g_pc.xyzrgb.size()/6), maxN);
@@ -298,7 +351,6 @@ extern "C" bool PC_GetPointCloudXYZRGB(float* dst, int maxN, int* outN) {
     return true;
 }
 
-extern "C" void StereoCam_RegisterCallback(StereoYuvCallback cb); // from header:contentReference[oaicite:2]{index=2}
 static void OnYuv(bool isLeft, const uint8_t* y, const uint8_t* u, const uint8_t* v,
                   int w,int h,int yStride,int uStride,int vStride,int uvPixStride,int64_t tsNs)
 {
@@ -336,7 +388,7 @@ static void ProcLoop()
         lastLi = g_li; lastRi = g_ri;
 
         YuvFrame L,R; int64_t tL=0;
-        if (nearest_pair(tL, L, R, 4)) {
+        if (nearest_pair(tL, L, R, g_cfg.maxPairDtMs)) {
             lk.unlock();
             process_pair(L, R);
             lk.lock();
@@ -350,11 +402,10 @@ static void ProcLoop()
     }
 }
 
-extern "C" bool  StereoCam_GetIntrinsics(bool isLeft, CamIntrinsics* out); //:contentReference[oaicite:3]{index=3}
-extern "C" bool  StereoCam_GetExtrinsics(bool isLeft, CamExtrinsics* out); //:contentReference[oaicite:4]{index=4}
+void PC_InitProcessing(const PC_Config* cfg) {
+    g_cfg = *cfg;
+    g_targetHz.store(std::max(1, cfg->targetHz), std::memory_order_relaxed);
 
-extern "C" void PC_InitProcessing(int imgW, int imgH) {
-    g_imgW = imgW; g_imgH = imgH;
     StereoCam_GetIntrinsics(true,  &g_KL);
     StereoCam_GetIntrinsics(false, &g_KR);
     StereoCam_GetExtrinsics(true,  &g_XL);
@@ -367,11 +418,11 @@ extern "C" void PC_InitProcessing(int imgW, int imgH) {
     g_worker = std::thread(ProcLoop);
 }
 
-extern "C" void PC_RegisterPointCloudUpdated(PointCloudUpdatedCallback cb) {
+void PC_RegisterPointCloudUpdated(PointCloudUpdatedCallback cb) {
     g_pcCb = cb;
 }
 
-extern "C" void PC_StopProcessing()
+void PC_StopProcessing()
 {
     if (!g_run.exchange(false)) return;
     g_bufCv.notify_all();
