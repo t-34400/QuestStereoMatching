@@ -1,13 +1,14 @@
-#include "stereo_cam_ndk.h"              // API surface:contentReference[oaicite:1]{index=1}
+#include "stereo_cam_ndk.h"
+#include "stereo_match_sgbm.h"
+#include "stereo_match_executorch.h"
 #include <thread>
 #include <atomic>
 #include <condition_variable>
 #include <vector>
 #include <mutex>
 #include <opencv2/core.hpp>
-#include <opencv2/imgproc.hpp>
 #include <opencv2/calib3d.hpp>
-#include <opencv2/ximgproc/disparity_filter.hpp>
+#include <opencv2/imgproc.hpp>
 
 #define LOGE_TAG "StereoNDK"
 #include <android/log.h>
@@ -31,9 +32,6 @@ std::mutex g_mtx;
 bool g_rectReady = false;
 
 cv::Mat g_map1x, g_map1y, g_map2x, g_map2y, g_Q;
-cv::Ptr<cv::StereoSGBM> g_sgbm;
-cv::Ptr<cv::StereoMatcher> g_right;
-cv::Ptr<cv::ximgproc::DisparityWLSFilter> g_wls;
 
 std::mutex g_bufMtx;
 std::condition_variable g_bufCv;
@@ -50,6 +48,8 @@ CamIntrinsics g_KL{}, g_KR{};
 CamExtrinsics g_XL{}, g_XR{};
 
 PC_Config g_cfg;
+BackendType g_backend = BackendType::SGBM;
+BANet_Config g_banetCfg;
 
 static inline std::chrono::milliseconds hz_period(int hz) {
     return std::chrono::milliseconds(hz > 0 ? (1000 / hz) : 1000);
@@ -102,11 +102,7 @@ static cv::Mat yuv420_to_bgr(const YuvFrame& f) {
     }
 }
 
-cv::Mat to_gray_clahe(const cv::Mat& bgr) {
-    cv::Mat g; cv::cvtColor(bgr, g, cv::COLOR_BGR2GRAY);
-    auto clahe = cv::createCLAHE(g_cfg.cropLimit, cv::Size(g_cfg.tileGridW,g_cfg.tileGridH));
-    cv::Mat out; clahe->apply(g, out); return out;
-}
+
 
 bool nearest_pair(int64_t& tL, YuvFrame& L, YuvFrame& R, int64_t maxDtMs=2) {
     // O(k^2) on tiny ring; fine here
@@ -196,36 +192,9 @@ void ensure_rectify() {
     logMat("P1 (rectified left proj)", P1);
     logMat("P2 (rectified right proj)", P2);
     logMat("Q", Q);
-
-    // SGBM
-    int block = g_cfg.blockSize;
-    int numDisp = g_cfg.numDisparities;
-    int numCh = 1;
-    g_sgbm = cv::StereoSGBM::create(
-        g_cfg.minDisparity,
-        (numDisp+15)/16*16,     // numDisparities
-        block,                  // blockSize
-        g_cfg.p1Mul*numCh*block*block,       // P1
-        g_cfg.p2Mul*numCh*block*block,       // P2
-        g_cfg.disp12MaxDiff,
-        g_cfg.preFilterCap,
-        g_cfg.uniquenessRatio,
-        g_cfg.speckleWindowSize,
-        g_cfg.speckleRange, 
-        g_cfg.mode
-    );
-    g_right = cv::ximgproc::createRightMatcher(g_sgbm);
-    g_wls = cv::ximgproc::createDisparityWLSFilter(g_sgbm);
-    g_wls->setLambda(g_cfg.wlsLambda);
-    g_wls->setSigmaColor(g_cfg.wlsSigmaColor);
 }
 
 void process_pair(const YuvFrame& L, const YuvFrame& R) {
-    double scale  = g_cfg.scale;
-    float confThr = g_cfg.confThr;
-    float lr_tol  = g_cfg.lrTolerance;
-    float zMax    = g_cfg.zMax;
-
     auto t0 = std::chrono::steady_clock::now();
     ensure_rectify();
 
@@ -236,78 +205,83 @@ void process_pair(const YuvFrame& L, const YuvFrame& R) {
     cv::remap(Lbgr, Lrect, g_map1x, g_map1y, cv::INTER_LINEAR);
     cv::remap(Rbgr, Rrect, g_map2x, g_map2y, cv::INTER_LINEAR);
 
-    cv::Mat Ls, Rs;
-    cv::resize(Lrect, Ls, cv::Size(), scale, scale, cv::INTER_AREA);
-    cv::resize(Rrect, Rs, cv::Size(), scale, scale, cv::INTER_AREA);
-
-    cv::Mat gL = to_gray_clahe(Ls);
-    cv::Mat gR = to_gray_clahe(Rs);
-
-    cv::Mat dispL_16S, dispR_16S;
-    g_sgbm->compute(gL, gR, dispL_16S);
-    g_right->compute(gR, gL, dispR_16S);
-
-    cv::Mat disp_wls_16S;
-    g_wls->filter(dispL_16S, gL, disp_wls_16S, dispR_16S);
-
-    cv::Mat conf32f = g_wls->getConfidenceMap();
-
-    cv::Mat dispS; disp_wls_16S.convertTo(dispS, CV_32F, 1.0/16.0);
-
-    cv::Mat dL32f, dR32f;
-    disp_wls_16S.convertTo(dL32f, CV_32F, 1.0/16.0);
-    dispR_16S.convertTo(dR32f, CV_32F, 1.0/16.0);
-
-    cv::Mat dispFull(Lrect.rows, Lrect.cols, CV_32F);
-    const float invScale = 1.0f / static_cast<float>(scale);
-
-    #pragma omp parallel for
-    for (int Y = 0; Y < dispFull.rows; ++Y) {
-        float* df = dispFull.ptr<float>(Y);
-        int y = std::min((int)std::lround(Y * scale), dL32f.rows - 1); // nearest-neighbor index
-        const float* lrow = dL32f.ptr<float>(y);
-        const float* rrow = dR32f.ptr<float>(y);
-        const float* crow = conf32f.ptr<float>(y);
-
-        for (int X = 0; X < dispFull.cols; ++X) {
-            int x = std::min((int)std::lround(X * scale), dL32f.cols - 1);
-
-            float dl = lrow[x];
-            if (!(dl > 0)) { df[X] = 0.f; continue; }
-            if (crow[x] < confThr) { df[X] = 0.f; continue; }
-
-            int xr = x - (int)std::lround(dl);                 // LR hard check (nearest)
-            if ((unsigned)xr >= (unsigned)dR32f.cols) { df[X] = 0.f; continue; }
-            float dr = rrow[xr];
-            if (std::fabs(dl + dr) > lr_tol) { df[X] = 0.f; continue; }
-
-            df[X] = dl * invScale; // valid: write scaled disparity to full-res
-        }
+    cv::Mat dispFull;
+    BAResult bares;
+    switch (g_backend) {
+        case BackendType::ExecuTorch:
+            LOGI("[Executorch] Estimation started.");
+            try {
+                bares = estimate_disparity_executorch(Lrect, Rrect);
+                if (bares.status != BAStatus::Ok) {
+                    LOGE("[Executorch] %s", bares.errorMsg.c_str());
+                    break;
+                }
+                LOGI("[Executorch] Estimation completed.");
+                dispFull = bares.image;
+            } catch (const std::exception& e) {
+                LOGE("[Executorch] Estimation failed: %s", e.what());
+            }
+            break;
+        default:
+            dispFull = estimate_disparity_sgbm(Lrect, Rrect);
+            break;
     }
 
+    // --- relative gradient mask (all thresholds from g_cfg) ---
+    cv::Mat disp_blur = dispFull;
+    if (g_cfg.relGradSigma > 0.0f) {
+        cv::GaussianBlur(dispFull, disp_blur, cv::Size(), g_cfg.relGradSigma);
+    }
+
+    cv::Mat gx, gy, grad;
+    cv::Scharr(disp_blur, gx, CV_32F, 1, 0);
+    cv::Scharr(disp_blur, gy, CV_32F, 0, 1);
+    cv::magnitude(gx, gy, grad);
+
+    const float eps = 1e-3f;
+    cv::Mat rel = grad / (cv::abs(disp_blur) + eps);
+
+    float relThr = g_cfg.relGradThr;
+    if (!(relThr > 0.0f)) {
+        float q = (g_cfg.relGradQuantile > 0.f && g_cfg.relGradQuantile <= 1.f)
+                ? g_cfg.relGradQuantile : 0.90f;
+        cv::Mat flat = rel.reshape(1,1).clone();
+        cv::sort(flat, flat, cv::SORT_EVERY_ROW | cv::SORT_ASCENDING);
+        int kth = std::min(std::max(int(q * flat.cols), 0), flat.cols - 1);
+        relThr = flat.at<float>(0, kth);
+    }
+    cv::Mat valid_grad = (rel < relThr);
+    if (g_cfg.gradAbsCap > 0.0f) {
+        valid_grad &= (grad < g_cfg.gradAbsCap);
+    }
+    valid_grad &= (dispFull > 0);
+
+    // --- 3D projection ---
     cv::Mat xyz;
     cv::reprojectImageTo3D(dispFull, xyz, g_Q, true, CV_32F);
 
     std::vector<float> out; out.reserve(30000*6);
-    int rowStep = g_cfg.outputRowStep;
-    int colStep = g_cfg.outputColStep;
+    const int rowStep = g_cfg.outputRowStep;
+    const int colStep = g_cfg.outputColStep;
+    const float zMin = g_cfg.zMin;
+    const float zMax = g_cfg.zMax;
 
     const cv::Mat& rgbSrc = Lrect;
-    for (int y=0;y<xyz.rows;y+=rowStep){
+    for (int y = 0; y < xyz.rows; y += rowStep) {
         const cv::Vec3f* row  = xyz.ptr<cv::Vec3f>(y);
-        const float*     drow = dispFull.ptr<float>(y);
         const cv::Vec3b* crow = rgbSrc.ptr<cv::Vec3b>(y);
-        for (int x=0;x<xyz.cols;x+=colStep){
-            const float d = drow[x];
-            if (!(d>0)) continue;
-            const auto& p = row[x];
-            if (p[2] > 0.0f && p[2] < zMax) {
-                const cv::Vec3b cBGR = crow[x];
-                out.push_back(p[0]); out.push_back(p[1]); out.push_back(p[2]);
-                out.push_back(cBGR[2]*(1.0f/255.0f));
-                out.push_back(cBGR[1]*(1.0f/255.0f));
-                out.push_back(cBGR[0]*(1.0f/255.0f));
-            }
+        const uchar*     mrow = valid_grad.ptr<uchar>(y);
+
+        for (int x = 0; x < xyz.cols; x += colStep) {
+            if (!mrow[x]) continue;
+            const cv::Vec3f& p = row[x];
+            if (p[2] < zMin || p[2] >= zMax) continue;
+
+            const cv::Vec3b cBGR = crow[x];
+            out.push_back(p[0]); out.push_back(p[1]); out.push_back(p[2]);
+            out.push_back(cBGR[2]*(1.0f/255.0f));
+            out.push_back(cBGR[1]*(1.0f/255.0f));
+            out.push_back(cBGR[0]*(1.0f/255.0f));
         }
     }
 
@@ -402,8 +376,27 @@ static void ProcLoop()
     }
 }
 
-void PC_InitProcessing(const PC_Config* cfg) {
+void PC_InitProcessing(const PC_Config* cfg, const SGBM_Config* sgbmCfg, const BANet_Config* banetCfg) {
     g_cfg = *cfg;
+    g_backend = static_cast<BackendType>(g_cfg.backend);
+
+    init_stereo_sgbm(sgbmCfg);
+    bool executorch_ok;
+    switch (g_backend) {
+        case BackendType::ExecuTorch:
+            executorch_ok = init_stereo_executorch(banetCfg);
+            if (executorch_ok) {
+                LOGI("[Executorch] Initialization succeeded.");
+                LOGI("[Executorch] %s", get_forward_meta_info().c_str());
+            } else {
+                LOGE("[Executorch] Initialization failed.");
+            }
+            break;
+        default:
+            break;
+    }
+    g_banetCfg = *banetCfg;
+
     g_targetHz.store(std::max(1, cfg->targetHz), std::memory_order_relaxed);
 
     StereoCam_GetIntrinsics(true,  &g_KL);
@@ -427,4 +420,5 @@ void PC_StopProcessing()
     if (!g_run.exchange(false)) return;
     g_bufCv.notify_all();
     if (g_worker.joinable()) g_worker.join();
+    deinit_stereo_executorch();
 }
