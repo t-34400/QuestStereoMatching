@@ -488,7 +488,7 @@ RectTransform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 373798372}
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0.5}
+  m_LocalPosition: {x: 0, y: 0, z: 0.3}
   m_LocalScale: {x: 0.01, y: 0.01, z: 0.01}
   m_ConstrainProportionsScale: 0
   m_Children:
@@ -1078,29 +1078,18 @@ MonoBehaviour:
   isNV12: 1
   targetHz: 10
   maxPairDtMs: 4
-  cropLimit: 1.2
-  tileGridW: 8
-  tileGridH: 8
-  minDisparity: 2
-  numDisparities: 96
-  blockSize: 3
-  p1Mul: 8
-  p2Mul: 96
-  disp12MaxDiff: 1
-  preFilterCap: 15
-  uniquenessRatio: 35
-  speckleWindowSize: 100
-  speckleRange: 1
-  mode: 2
-  wlsLambda: 10000
-  wlsSigmaColor: 0.9
-  scale: 0.5
+  backend: 1
+  relGradSigma: 2
+  relGradThr: 0
+  relGradQuantile: 0.9
+  gradAbsCap: 36
+  zMin: 0.25
   zMax: 1.5
-  confThr: 0
-  lrTolerance: 100
   outputRowStep: 2
   outputColStep: 2
   maxPoints: 500000
+  sgbmConfigAsset: {fileID: 11400000, guid: 2af107354029e704393060c06aa0b014, type: 2}
+  baNetConfigAsset: {fileID: 11400000, guid: 502f5675cf3fab948b856a89c3f2cc26, type: 2}
 --- !u!1 &1796386667
 GameObject:
   m_ObjectHideFlags: 0
