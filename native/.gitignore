@@ -42,3 +42,4 @@
 
 # Third party build file
 !third_party/**/*.so
+!third_party/**/*.a

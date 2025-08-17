@@ -1,0 +1,33 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 0dfdcd53ce8abe742a4c23ac358e3e06, type: 3}
+  m_Name: SGBMConfigAsset
+  m_EditorClassIdentifier: 
+  cropLimit: 1.2
+  tileGridW: 8
+  tileGridH: 8
+  scale: 0.5
+  minDisparity: 0
+  numDisparities: 96
+  blockSize: 5
+  p1Mul: 8
+  p2Mul: 96
+  disp12MaxDiff: 1
+  preFilterCap: 15
+  uniquenessRatio: 35
+  speckleWindowSize: 200
+  speckleRange: 1
+  mode: 2
+  wlsLambda: 15000
+  wlsSigmaColor: 0.9
+  confThr: 0
+  lrTolerance: 100

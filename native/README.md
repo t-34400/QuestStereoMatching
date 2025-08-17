@@ -11,7 +11,7 @@ This directory contains the native plugin source code for **stereo matching** on
 2. **OpenCV Core + ximgproc**
     The required OpenCV core and ximgproc binaries are already included in `third_party/opencv`.
     If you want to build them yourself for Meta Quest, please refer to the workflow in:
-    [https://github.com/t-34400/opencv-quest-build](https://github.com/t-34400/opencv-quest-build)
+    [https://github.com/t-34400/android-native-build](https://github.com/t-34400/android-native-build)
 ---
 
 ## Building

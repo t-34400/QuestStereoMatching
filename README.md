@@ -9,6 +9,9 @@
 Quest Stereo Matching is a real-time stereo matching application for Meta Quest 3 / 3s.
 It generates and displays a 3D point cloud in real time using stereo camera input.
 
+> **Since v1.1.0**: You can use **BANet** ([gangweix/BANet](https://github.com/gangweix/BANet)) as an inference backend (via ExecuTorch/XNNPACK).
+> The backend can be switched from **StereoRunner**, and both **SGBM** and **BANet** parameters are editable via the **config object attached to StereoRunner**.
+
 ## YouTube
 
 <div align="left">
@@ -17,7 +20,10 @@ It generates and displays a 3D point cloud in real time using stereo camera inpu
 
 ## Features
 
-* Real-time stereo matching with **SGBM + WLS filtering**
+* Real-time stereo matching with:
+
+  * **SGBM + WLS filtering**
+  * **BANet backend (ExecuTorch/XNNPACK)** — *available since v1.1.0; switchable from StereoRunner; parameters for both backends editable via the attached config object*
 * Direct visualization of the generated 3D point cloud in VR
 * Pause and resume processing using either:
 
@@ -33,7 +39,11 @@ It generates and displays a 3D point cloud in real time using stereo camera inpu
 
 ## Configuration
 
-* Stereo matching parameters can be adjusted via the **StereoRunner** component in the Unity Inspector.
+* All stereo matching parameters are exposed via the **StereoRunner** component in the Unity Inspector.
+* **Since v1.1.0**:
+
+  * You can **switch the inference backend (SGBM ↔ BANet)** directly on **StereoRunner**.
+  * **SGBM** and **BANet** parameters can be edited via the **config ScriptableObject attached to StereoRunner**.
 
 ## Build
 
@@ -41,6 +51,7 @@ It generates and displays a 3D point cloud in real time using stereo camera inpu
 * Prebuilt APKs are available in the [Releases](https://github.com/t-34400/QuestStereoMatching/releases) section.
 
 ## Notes
+
 When configured for a target frequency of 10 Hz, the application typically shows an average latency of around 0.3 seconds.
 
 ## Acknowledgements
@@ -49,6 +60,7 @@ This project makes use of the following open-source projects:
 
 * [OpenCV](https://opencv.org/)
 * [OpenCV Contrib](https://github.com/opencv/opencv_contrib) (`ximgproc` module)
+* **[BANet](https://github.com/gangweix/BANet)** — used as a neural stereo backend since v1.1.0
 
 We would like to thank the authors and contributors of these projects.
 Users and developers are expected to comply with the respective licenses of these dependencies.
